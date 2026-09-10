@@ -30,7 +30,6 @@ jobs:
       - name: Upload images
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SOURCE_TOKEN: ${{ secrets.SOURCE_TOKEN }}
         run: python3 upload_images.py
 
       - name: Commit progress
@@ -39,7 +38,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add upload_progress.json 2>/dev/null || true
-          git commit -m "progress: $(date -u '+%Y-%m-%d %H:%M UTC')" 2>/dev/null || echo "Nothing to commit"
+          git commit -m "progress: $(date -u '+%Y-%m-%d %H:%M UTC')" 2>/dev/null || echo "Nothing"
           git push origin HEAD 2>/dev/null || echo "Push skipped"
           exit 0
 
