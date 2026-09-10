@@ -1,0 +1,302 @@
+name: Upload PYQ Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      series_index:
+        description: 'Series index to process (0-6, empty=all)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: upload-images
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install httpx
+
+      - name: Upload images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_TOKEN: ${{ secrets.SOURCE_TOKEN }}
+        run: |
+          python3 << 'PYEOF'
+import json, os, time, base64, urllib.request, urllib.parse, httpx
+from datetime import datetime, timezone
+
+SOURCE_REPO = "sujitbhai7710/repeatermock-mass-scraper"
+TARGET_REPO = "sujitbhai7710/repeatermock-pyq-papers"  # Push to same repo as PYQ papers? No, push to THIS repo
+# Actually push to the images repo (self)
+TARGET_REPO = os.environ.get("GITHUB_REPOSITORY", "sujitbhai7710/repeatermock-pyq-images")
+
+# Use GITHUB_TOKEN for pushing to this repo
+GH_TOKEN = os.environ.get("GH_TOKEN", "")
+# Use SOURCE_TOKEN for reading from source repo (or just use raw URLs without auth)
+SOURCE_TOKEN = os.environ.get("SOURCE_TOKEN", GH_TOKEN)
+
+SERIES_MAP = [
+    ("SSC-CGL-2026", "SSC-CGL"),
+    ("SSC-CHSL-2025", "SSC-CHSL"),
+    ("SSC-CPO-2026", "SSC-CPO"),
+    ("SSC-GD-2026", "SSC-GD"),
+    ("SSC-MTS-2026", "SSC-MTS"),
+    ("SSC-SelPost-2026", "SSC-Selection-Post"),
+    ("SSC-Steno-2026", "SSC-Stenographer"),
+]
+
+START_TIME = time.time()
+MAX_RUNTIME = 5.5 * 3600  # 5.5 hours in seconds
+BATCH_SIZE = 50  # Upload 50 images per commit
+COMMIT_INTERVAL = 300  # Commit every 5 minutes
+
+def list_images_in_series(series_folder):
+    """List all image files in a series' images/ folder using GitHub API."""
+    all_images = []
+    path = f"scraped_output/{series_folder}/images"
+    
+    # Use GitHub API with pagination (100 per page)
+    for page in range(1, 100):  # Max 10000 images
+        encoded = urllib.parse.quote(path)
+        url = f"https://api.github.com/repos/{SOURCE_REPO}/contents/{encoded}?per_page=100&page={page}"
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"token {SOURCE_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                items = json.loads(r.read().decode())
+        except:
+            break
+        
+        if not isinstance(items, list) or len(items) == 0:
+            break
+        
+        for item in items:
+            if item['type'] == 'file' and item['name'].endswith('.png'):
+                all_images.append(item['name'])
+        
+        if len(items) < 100:
+            break
+    
+    return all_images
+
+def check_image_exists(series_target, image_name):
+    """Check if image already exists in target repo."""
+    path = f"{series_target}/images/{image_name}"
+    encoded = urllib.parse.quote(path)
+    url = f"https://api.github.com/repos/{TARGET_REPO}/contents/{encoded}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"token {GH_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return True
+    except:
+        return False
+
+def download_image(series_folder, image_name):
+    """Download image from source repo."""
+    path = f"scraped_output/{series_folder}/images/{image_name}"
+    encoded = urllib.parse.quote(path)
+    url = f"https://raw.githubusercontent.com/{SOURCE_REPO}/main/{encoded}"
+    with httpx.Client(timeout=30) as cli:
+        r = cli.get(url)
+        if r.status_code == 200:
+            return r.content
+    return None
+
+def upload_image(series_target, image_name, content):
+    """Upload image to target repo via GitHub API."""
+    path = f"{series_target}/images/{image_name}"
+    url = f"https://api.github.com/repos/{TARGET_REPO}/contents/{urllib.parse.quote(path)}"
+    data = json.dumps({
+        "message": f"Add image: {image_name}",
+        "content": base64.b64encode(content).decode(),
+    }).encode()
+    req = urllib.request.Request(url, data=data, method="PUT", headers={
+        "Authorization": f"token {GH_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return True
+    except:
+        return False
+
+# Main upload loop
+print("=" * 80)
+print("PYQ Images Uploader")
+print(f"Target: {TARGET_REPO}")
+print(f"Max runtime: 5.5 hours")
+print(f"Batch size: {BATCH_SIZE} images per commit")
+print("=" * 80)
+
+total_uploaded = 0
+total_skipped = 0
+total_failed = 0
+last_commit_time = time.time()
+series_idx = int(os.environ.get("series_index", "0")) if os.environ.get("series_index") else 0
+
+for si in range(series_idx, len(SERIES_MAP)):
+    series_folder, series_target = SERIES_MAP[si]
+    
+    # Check time limit
+    elapsed = time.time() - START_TIME
+    if elapsed >= MAX_RUNTIME:
+        print(f"\n⏰ Max runtime reached after {elapsed/3600:.1f}h - stopping")
+        break
+    
+    print(f"\n--- Series {si+1}/{len(SERIES_MAP)}: {series_folder} → {series_target}/images/ ---")
+    
+    # List all images in source
+    print(f"  Listing images in source...", flush=True)
+    all_images = list_images_in_series(series_folder)
+    print(f"  Found {len(all_images)} images", flush=True)
+    
+    # Check which ones already exist
+    pending = []
+    checked = 0
+    for img in all_images:
+        if not check_image_exists(series_target, img):
+            pending.append(img)
+        else:
+            total_skipped += 1
+        checked += 1
+        if checked % 100 == 0:
+            print(f"  Checked {checked}/{len(all_images)} ({len(pending)} pending)...", flush=True)
+    
+    print(f"  Already uploaded: {len(all_images) - len(pending)}")
+    print(f"  Pending: {len(pending)}")
+    
+    if not pending:
+        print(f"  ✅ All images already uploaded for {series_target}")
+        continue
+    
+    # Upload pending images
+    batch = []
+    for img in pending:
+        # Check time limit
+        elapsed = time.time() - START_TIME
+        if elapsed >= MAX_RUNTIME:
+            print(f"\n⏰ Max runtime reached - stopping at {total_uploaded} images uploaded")
+            break
+        
+        # Download
+        content = download_image(series_folder, img)
+        if not content:
+            total_failed += 1
+            continue
+        
+        # Upload
+        success = upload_image(series_target, img, content)
+        if success:
+            total_uploaded += 1
+            batch.append(img)
+        else:
+            total_failed += 1
+        
+        # Progress
+        if total_uploaded % 50 == 0:
+            print(f"  📤 Uploaded {total_uploaded} images ({total_skipped} skipped, {total_failed} failed)", flush=True)
+        
+        # Rate limit
+        time.sleep(0.3)
+    
+    # Check time limit
+    elapsed = time.time() - START_TIME
+    if elapsed >= MAX_RUNTIME:
+        break
+
+# Final summary
+elapsed = time.time() - START_TIME
+print(f"\n{'=' * 80}")
+print(f"UPLOAD COMPLETE")
+print(f"{'=' * 80}")
+print(f"  Uploaded: {total_uploaded}")
+print(f"  Skipped (already exists): {total_skipped}")
+print(f"  Failed: {total_failed}")
+print(f"  Runtime: {elapsed/3600:.1f} hours")
+
+# Save progress
+progress = {
+    "uploaded": total_uploaded,
+    "skipped": total_skipped,
+    "failed": total_failed,
+    "runtime_hours": elapsed / 3600,
+    "completed_at": datetime.now(timezone.utc).isoformat(),
+}
+with open("upload_progress.json", "w") as f:
+    json.dump(progress, f, indent=2)
+
+# Write outputs for trigger step
+with open(os.environ.get("GITHUB_OUTPUT", "/dev/null"), "a") as f:
+    f.write(f"uploaded={total_uploaded}\n")
+    f.write(f"skipped={total_skipped}\n")
+    f.write(f"failed={total_failed}\n")
+PYEOF
+
+      - name: Commit progress file
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add upload_progress.json 2>/dev/null || true
+          git commit -m "upload progress: $(date -u '+%Y-%m-%d %H:%M UTC')" 2>/dev/null || echo "Nothing to commit"
+          git push origin HEAD 2>/dev/null || echo "Push failed"
+          exit 0
+
+      - name: Trigger next run if needed
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          # Check if all 7 series are complete by reading progress
+          TOTAL_IMAGES=75493
+          
+          # Count images in our repo
+          UPLOADED=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/git/trees/main?recursive=1" | \
+            python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          tree = d.get('tree', [])
+          count = sum(1 for t in tree if t['path'].endswith('.png') and t['type'] == 'blob')
+          print(count)
+          " 2>/dev/null || echo "0")
+          
+          echo "Images in repo: $UPLOADED / $TOTAL_IMAGES"
+          
+          if [ "$UPLOADED" -lt "$TOTAL_IMAGES" ]; then
+            echo "Triggering next upload run..."
+            sleep 60
+            curl -s -X POST \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/upload-images.yml/dispatches" \
+              -d '{"ref":"main"}' \
+              -w "\nTrigger HTTP: %{http_code}\n"
+          else
+            echo "✅ All images uploaded!"
+          fi
+          exit 0
