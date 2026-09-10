@@ -1,7 +1,7 @@
 {
-  "uploaded": 0,
+  "uploaded": 994,
   "skipped": 0,
-  "failed": 0,
-  "runtime_hours": 0.0004216781589719984,
-  "completed_at": "2026-09-10T15:57:25.359137+00:00"
+  "failed": 24989,
+  "runtime_hours": 5.400116809275415,
+  "completed_at": "2026-09-10T21:28:23.762904+00:00"
 }
