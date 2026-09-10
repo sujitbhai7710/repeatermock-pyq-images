@@ -37,7 +37,7 @@ def list_images(series_folder):
         encoded = urllib.parse.quote(path)
         url = f"https://api.github.com/repos/{SOURCE_REPO}/contents/{encoded}?per_page=100&page={page}"
         try:
-            items = gh_api(url, token=GH_TOKEN)
+            items = gh_api(url, token=os.environ.get("SOURCE_TOKEN", GH_TOKEN))
         except Exception as e:
             if page == 1:
                 print(f"    Error: {e}")
